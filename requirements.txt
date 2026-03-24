@@ -1,5 +1,8 @@
 streamlit
 pandas
 numpy
-rdacca_hp
+matplotlib
 openpyxl
+rdacca_hp
+scikit-learn
+scipy
