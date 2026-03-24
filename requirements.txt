@@ -3,6 +3,6 @@ pandas
 numpy
 matplotlib
 openpyxl
-rdacca_hp
 scikit-learn
 scipy
+git+https://github.com/peony-peo/rdacca_hp.git
