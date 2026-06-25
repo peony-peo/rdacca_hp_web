@@ -6,10 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.metrics import pairwise_distances
 
-from rdacca_hp import rdacca_hp, permu_hp
-from rdacca_hp.utils import coerce_distance_input
+from rdacca_hp import __version__, permu_hp, rdacca_hp
+from rdacca_hp.utils import VEGAN_DISTANCE_METHODS, coerce_distance_input
 
 
 st.set_page_config(page_title="rdacca_hp Online Analysis System", layout="wide")
@@ -68,16 +67,16 @@ def label_to_type_code(label: str) -> str:
 
 DV_MODE_LABELS = {
     "distance_matrix": {
-        "en": "Distance matrix (square)",
-        "zh": "距离矩阵（方阵）",
+        "en": "Precomputed distance matrix",
+        "zh": "预先计算的距离矩阵",
     },
     "distance_vector": {
-        "en": "Distance vector (condensed)",
-        "zh": "距离向量（condensed）",
+        "en": "Precomputed distance vector",
+        "zh": "预先计算的距离向量",
     },
     "response_matrix": {
-        "en": "Response matrix",
-        "zh": "普通响应矩阵",
+        "en": "Raw species/community matrix",
+        "zh": "原始物种/群落矩阵",
     },
 }
 
@@ -301,31 +300,6 @@ def hellinger_transform(df: pd.DataFrame) -> pd.DataFrame:
     return np.sqrt(rel)
 
 
-def response_matrix_to_bray_distance(df: pd.DataFrame) -> np.ndarray:
-    """For dbRDA response matrix mode: convert a community matrix to Bray-Curtis distances."""
-    df_num = df.apply(pd.to_numeric, errors="raise")
-
-    if (df_num < 0).any().any():
-        raise ValueError(
-            tr(
-                "Bray-Curtis distance is not suitable for response matrices with negative values.",
-                "Bray-Curtis 距离不适用于含负值的响应矩阵，请检查数据。",
-            )
-        )
-
-    dist = pairwise_distances(df_num, metric="braycurtis")
-
-    if not np.all(np.isfinite(dist)):
-        raise ValueError(
-            tr(
-                "The Bray-Curtis distance contains NaN or Inf. Please check whether there are all-zero samples.",
-                "Bray-Curtis 距离计算结果包含 NaN 或 Inf，请检查是否存在全零样点。",
-            )
-        )
-
-    return dist
-
-
 def preprocess_normal_tables(
     dv: pd.DataFrame,
     iv: pd.DataFrame,
@@ -443,14 +417,19 @@ def preprocess_distance_vector(
             )
         iv2 = iv2.drop(columns=iv_drop_cols)
 
-    dist_mat = coerce_distance_input(dv_vec)
-
     if dv_drop_rows_1based:
+        dist_mat = coerce_distance_input(dv_vec)
         dist_df = pd.DataFrame(dist_mat)
         dist_df = drop_rows_and_cols_by_r_position(dist_df, dv_drop_rows_1based)
         dist_mat = np.asarray(dist_df, dtype=float)
+        n_distance_samples = dist_mat.shape[0]
+        dv_output: np.ndarray = dist_mat
+    else:
+        n_values = len(dv_vec)
+        n_distance_samples = int(round((1 + np.sqrt(1 + 8 * n_values)) / 2))
+        dv_output = np.asarray(dv_vec, dtype=float)
 
-    if len(iv2) != dist_mat.shape[0]:
+    if len(iv2) != n_distance_samples:
         raise ValueError(
             tr(
                 "The number of samples represented by the distance vector does not match the explanatory variable table.",
@@ -458,11 +437,50 @@ def preprocess_distance_vector(
             )
         )
 
-    return dist_mat, iv2
+    return dv_output, iv2
 
 
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=True).encode("utf-8-sig")
+
+
+def format_permutation_result_for_web(result: pd.DataFrame) -> pd.DataFrame:
+    """Separate the R-style p-value and significance marks for table output."""
+    formatted = result.copy()
+    p_column = "Pr(>I)"
+
+    if p_column not in formatted.columns:
+        return formatted
+
+    raw_values = formatted[p_column]
+    if pd.api.types.is_numeric_dtype(raw_values):
+        p_values = pd.to_numeric(raw_values, errors="raise")
+        significance = p_values.map(
+            lambda p: "***"
+            if p <= 0.001
+            else "**"
+            if p <= 0.01
+            else "*"
+            if p <= 0.05
+            else ""
+        )
+    else:
+        parsed = raw_values.astype(str).str.extract(
+            r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(\*{1,3})?\s*$"
+        )
+        invalid = parsed[0].isna()
+        if invalid.any():
+            invalid_values = raw_values.loc[invalid].astype(str).tolist()
+            raise ValueError(
+                f"Cannot parse permutation p-value output: {invalid_values}"
+            )
+
+        p_values = pd.to_numeric(parsed[0], errors="raise")
+        significance = parsed[1].fillna("")
+
+    formatted[p_column] = p_values.to_numpy()
+    formatted["Significance"] = significance.to_numpy()
+    return formatted
 
 
 def dataframe_to_excel_bytes(
@@ -515,7 +533,10 @@ def auto_detect_variable_types(df: pd.DataFrame) -> Dict[str, str]:
     return detected
 
 
-def build_factor_settings(iv: pd.DataFrame) -> Tuple[List[str], Dict[str, List[str]], Dict[str, str]]:
+def build_factor_settings(
+    iv: pd.DataFrame,
+    enable_groups: bool,
+) -> Tuple[List[str], Dict[str, List[str]], Dict[str, str], Dict[str, str]]:
     st.subheader(tr("Explanatory variable type settings", "解释变量类型设置"))
     st.caption(
         tr(
@@ -529,16 +550,20 @@ def build_factor_settings(iv: pd.DataFrame) -> Tuple[List[str], Dict[str, List[s
     col_var = tr("Variable", "变量名")
     col_detected = tr("Detected type", "系统识别")
     col_user = tr("User setting", "用户设置")
+    col_group = tr("Predictor group", "解释变量组")
     col_order = tr("Ordered levels", "有序水平顺序")
 
-    config_df = pd.DataFrame(
-        {
-            col_var: list(iv.columns),
-            col_detected: [type_label(detected[col]) for col in iv.columns],
-            col_user: [type_label(detected[col]) for col in iv.columns],
-            col_order: ["" for _ in iv.columns],
-        }
-    )
+    config_data = {
+        col_var: list(iv.columns),
+        col_detected: [type_label(detected[col]) for col in iv.columns],
+        col_user: [type_label(detected[col]) for col in iv.columns],
+    }
+    if enable_groups:
+        # Separate names preserve the ordinary per-variable analysis until the
+        # user assigns the same group name to multiple variables.
+        config_data[col_group] = [str(col) for col in iv.columns]
+    config_data[col_order] = ["" for _ in iv.columns]
+    config_df = pd.DataFrame(config_data)
 
     for i, col in enumerate(iv.columns):
         if detected[col] == "categorical":
@@ -546,43 +571,66 @@ def build_factor_settings(iv: pd.DataFrame) -> Tuple[List[str], Dict[str, List[s
             if len(unique_levels) >= 2:
                 config_df.loc[i, col_order] = " > ".join(unique_levels)
 
+    column_config = {
+        col_var: st.column_config.TextColumn(col_var, disabled=True),
+        col_detected: st.column_config.TextColumn(col_detected, disabled=True),
+        col_user: st.column_config.SelectboxColumn(
+            col_user,
+            options=[
+                type_label("continuous"),
+                type_label("categorical"),
+                type_label("ordered"),
+                type_label("exclude"),
+            ],
+            required=True,
+        ),
+        col_order: st.column_config.TextColumn(
+            col_order,
+            help=tr(
+                "Required only when the variable is set as an ordered factor, for example: None > Few > Many.",
+                "仅当“用户设置”为“有序因子”时需要填写，例如：None > Few > Many。",
+            ),
+        ),
+    }
+    if enable_groups:
+        column_config[col_group] = st.column_config.TextColumn(
+            col_group,
+            required=True,
+            help=tr(
+                "Variables with the same group name are analyzed as one predictor group.",
+                "填写相同组名的变量将作为同一个解释变量组参与分析。",
+            ),
+        )
+
     edited_df = st.data_editor(
         config_df,
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        column_config={
-            col_var: st.column_config.TextColumn(col_var, disabled=True),
-            col_detected: st.column_config.TextColumn(col_detected, disabled=True),
-            col_user: st.column_config.SelectboxColumn(
-                col_user,
-                options=[
-                    type_label("continuous"),
-                    type_label("categorical"),
-                    type_label("ordered"),
-                    type_label("exclude"),
-                ],
-                required=True,
-            ),
-            col_order: st.column_config.TextColumn(
-                col_order,
-                help=tr(
-                    "Required only when the variable is set as an ordered factor, for example: None > Few > Many.",
-                    "仅当“用户设置”为“有序因子”时需要填写，例如：None > Few > Many。",
-                ),
-            ),
-        },
-        key="factor_editor",
+        column_config=column_config,
+        key=f"factor_editor_{'grouped' if enable_groups else 'ungrouped'}",
     )
 
     categorical_factors = []
     ordered_factors = {}
     user_type_map = {}
+    predictor_group_map = {}
 
     for _, row in edited_df.iterrows():
         col = row[col_var]
         user_type_code = label_to_type_code(str(row[col_user]))
         user_type_map[col] = user_type_code
+
+        if enable_groups and user_type_code != "exclude":
+            group_name = str(row[col_group]).strip()
+            if not group_name:
+                raise ValueError(
+                    tr(
+                        f"Variable {col} has no predictor group name.",
+                        f"变量 {col} 未填写解释变量组名称。",
+                    )
+                )
+            predictor_group_map[col] = group_name
 
         if user_type_code == "categorical":
             categorical_factors.append(col)
@@ -606,7 +654,7 @@ def build_factor_settings(iv: pd.DataFrame) -> Tuple[List[str], Dict[str, List[s
                 )
             ordered_factors[col] = levels
 
-    return categorical_factors, ordered_factors, user_type_map
+    return categorical_factors, ordered_factors, user_type_map, predictor_group_map
 
 
 def filter_iv_by_user_types(iv: pd.DataFrame, user_type_map: Dict[str, str]) -> pd.DataFrame:
@@ -619,6 +667,29 @@ def filter_iv_by_user_types(iv: pd.DataFrame, user_type_map: Dict[str, str]) -> 
             )
         )
     return iv[keep_cols].copy()
+
+
+def build_grouped_predictors(
+    iv: pd.DataFrame,
+    predictor_group_map: Dict[str, str],
+) -> Dict[str, pd.DataFrame]:
+    grouped_columns: Dict[str, List[str]] = {}
+    for col in iv.columns:
+        group_name = predictor_group_map.get(col, str(col)).strip()
+        grouped_columns.setdefault(group_name, []).append(col)
+
+    if len(grouped_columns) < 2:
+        raise ValueError(
+            tr(
+                "Grouped analysis requires at least two predictor groups.",
+                "分组分析至少需要两个解释变量组。",
+            )
+        )
+
+    return {
+        group_name: iv[columns].copy()
+        for group_name, columns in grouped_columns.items()
+    }
 
 
 def figure_to_bytes(fig, file_format: str) -> bytes:
@@ -730,8 +801,17 @@ def friendly_error_message(e: Exception) -> str:
             "数据中存在无法转换为数值的内容。请检查响应变量表、距离数据或需要数值化的列。",
         )
 
-    if "Bray-Curtis" in msg:
-        return msg
+    if "requires non-negative" in msg or "should be non-negative" in msg:
+        return tr(
+            "The selected distance or CCA requires non-negative response values.",
+            "所选距离方式或 CCA 要求响应数据为非负值。",
+        )
+
+    if "produced NaN or Inf" in msg:
+        return tr(
+            "Distance calculation produced NaN or Inf. Check for invalid or all-zero samples.",
+            "距离计算产生 NaN 或 Inf，请检查无效值或全零样点。",
+        )
 
     if "解释变量表中不存在这些列" in msg or "explanatory variable table does not contain" in msg:
         return msg
@@ -751,8 +831,8 @@ def friendly_error_message(e: Exception) -> str:
 st.title(tr("rdacca_hp Online Analysis System", "rdacca_hp 在线分析系统"))
 st.caption(
     tr(
-        "Hierarchical partitioning, variation partitioning, and permutation tests for RDA / CCA / dbRDA.",
-        "用于 RDA / CCA / dbRDA 的层次分解、变异分解与置换检验",
+        f"rdacca_hp {__version__} · Hierarchical partitioning, variation partitioning, and permutation tests for RDA / CCA / dbRDA.",
+        f"rdacca_hp {__version__} · 用于 RDA / CCA / dbRDA 的层次分解、变异分解与置换检验",
     )
 )
 
@@ -797,6 +877,26 @@ with st.sidebar:
         ),
     )
 
+    use_predictor_groups = st.checkbox(
+        tr("Analyze predictor groups", "按解释变量组分析"),
+        value=False,
+        help=tr(
+            "Enable this to assign variables to named groups in the variable settings table.",
+            "启用后，可在变量设置表中填写组名；相同组名的变量作为一个解释变量组。",
+        ),
+    )
+    if use_predictor_groups:
+        st.warning(
+            tr(
+                "Grouped analysis passes explanatory variables as predictor groups. "
+                "Permutation tests then follow the group/list input logic, so Pr(>I) "
+                "may differ from ordinary data-frame input even when each variable is "
+                "kept as a separate group.",
+                "按解释变量组分析会将解释变量作为 group/list 输入。此时 permutation test "
+                "遵循分组输入的置换逻辑；即使每个变量单独成组，Pr(>I) 也可能与普通解释变量表输入不同。",
+            )
+        )
+
     run_permutation = st.checkbox(
         tr("Run permutation test", "运行 permutation test"),
         value=False,
@@ -806,32 +906,92 @@ with st.sidebar:
         ),
     )
 
-    permutations = st.number_input(
-        tr("Permutations", "置换次数 permutations"),
-        min_value=9,
-        max_value=100000,
-        value=1000,
-        step=1,
-        help=tr(
-            "Default is 1000, following rdacca.hp semantics: 999 randomized runs plus 1 observed value in the empirical distribution.",
-            "默认 1000，与 rdacca.hp 习惯一致：999 次随机置换 + 1 次观测值参与经验分布。",
-        ),
-    )
+    permutations = 1000
+    if run_permutation:
+        permutations = st.number_input(
+            tr("Permutations", "置换次数 permutations"),
+            min_value=9,
+            max_value=100000,
+            value=1000,
+            step=1,
+            help=tr(
+                "Default is 1000, following rdacca.hp semantics: 999 randomized runs plus 1 observed value in the empirical distribution.",
+                "默认 1000，与 rdacca.hp 习惯一致：999 次随机置换 + 1 次观测值参与经验分布。",
+            ),
+        )
+
+    cca_n_perm = 1000
+    if method == "CCA" and r2_type == "adjR2":
+        cca_n_perm = st.number_input(
+            tr("CCA adjusted R2 permutations", "CCA 调整 R2 的内部置换次数"),
+            min_value=9,
+            max_value=100000,
+            value=1000,
+            step=1,
+            help=tr(
+                "This is n_perm for RsquareAdj.cca and is separate from the outer permu_hp test.",
+                "这是计算 CCA 调整 R2 的 n_perm，与外层 permu_hp 显著性置换次数不同。",
+            ),
+        )
 
     st.markdown("---")
     st.subheader(tr("Response data input", "响应数据输入"))
 
+    distance_method: Optional[str] = None
+    dbrdatype = "dbrda"
+    sqrt_dist = False
+    add: Union[bool, str] = False
+
     if method == "dbRDA":
         dv_input_mode = st.selectbox(
             tr("Response data format", "响应数据输入形式"),
-            ["distance_matrix", "distance_vector", "response_matrix"],
+            ["response_matrix", "distance_matrix", "distance_vector"],
             format_func=dv_mode_label,
             index=0,
             help=tr(
-                "dbRDA can use a square distance matrix, a condensed distance vector, or a response matrix that will be converted to Bray-Curtis distances.",
-                "dbRDA 可使用方阵距离矩阵、condensed distance vector，或上传普通响应矩阵并自动转换为 Bray-Curtis 距离矩阵。",
+                "dbRDA can use precomputed distances or a raw response matrix whose distances are calculated by rdacca_hp.",
+                "dbRDA 可使用预先计算的距离，也可上传原始响应矩阵并由 rdacca_hp 计算距离。",
             ),
         )
+
+        if dv_input_mode == "response_matrix":
+            distance_method = st.selectbox(
+                tr("Distance method", "距离方式"),
+                list(VEGAN_DISTANCE_METHODS),
+                index=list(VEGAN_DISTANCE_METHODS).index("bray"),
+                help=tr(
+                    "Distance is calculated inside rdacca_hp using vegan-compatible definitions.",
+                    "距离由 rdacca_hp 在包内按 vegan 兼容定义计算。",
+                ),
+            )
+
+        dbrdatype = st.selectbox(
+            "dbrdatype",
+            ["dbrda", "capscale"],
+            index=0,
+            help=tr(
+                "dbrda is the rdacca.hp default; capscale uses the PCoA-based route.",
+                "dbrda 是 rdacca.hp 的默认方式；capscale 使用基于 PCoA 的计算路径。",
+            ),
+        )
+        sqrt_dist = st.checkbox(
+            "sqrt_dist=True",
+            value=False,
+            help=tr(
+                "Take the square root of dissimilarities before dbRDA.",
+                "在 dbRDA 前对距离值开平方。",
+            ),
+        )
+        add_option = st.selectbox(
+            tr("Distance correction", "距离校正"),
+            ["none", "lingoes", "cailliez"],
+            index=0,
+            help=tr(
+                "Optional euclidification correction matching vegan.",
+                "可选的距离欧氏化校正，与 vegan 参数一致。",
+            ),
+        )
+        add = False if add_option == "none" else add_option
     else:
         dv_input_mode = "response_matrix"
 
@@ -877,8 +1037,8 @@ with st.sidebar:
         apply_hellinger = False
         st.caption(
             tr(
-                "Current mode uses a response matrix for dbRDA; the system will compute Bray-Curtis distances automatically. Hellinger transformation is not applied.",
-                "当前为 dbRDA 普通响应矩阵模式，系统会自动计算 Bray-Curtis 距离；Hellinger 转换暂不应用。",
+                "Current mode uses a raw response matrix; rdacca_hp will calculate the selected distance. Hellinger preprocessing is not applied here.",
+                "当前为 dbRDA 原始响应矩阵模式；rdacca_hp 将计算所选距离，网页不额外进行 Hellinger 转换。",
             )
         )
     else:
@@ -910,7 +1070,7 @@ with st.sidebar:
     )
 
     random_state_text = ""
-    if run_permutation:
+    if run_permutation or (method == "CCA" and r2_type == "adjR2"):
         st.markdown("---")
         random_state_text = st.text_input(
             "random_state",
@@ -928,6 +1088,11 @@ with col1:
         dv_label = tr("Upload distance vector (CSV / Excel)", "上传距离向量（CSV / Excel）")
     elif method == "dbRDA" and dv_input_mode == "distance_matrix":
         dv_label = tr("Upload distance matrix (CSV / Excel)", "上传距离矩阵（CSV / Excel）")
+    elif method == "dbRDA":
+        dv_label = tr(
+            "Upload raw species/community matrix (CSV / Excel; not a distance matrix)",
+            "上传原始物种/群落矩阵（CSV / Excel；不是距离矩阵）",
+        )
     else:
         dv_label = tr("Upload response table (CSV / Excel)", "上传响应变量表（CSV / Excel）")
 
@@ -947,8 +1112,8 @@ with col2:
 if method == "dbRDA":
     st.info(
         tr(
-            "Current method: dbRDA. Response data can be a response matrix, a square distance matrix, or a condensed distance vector. Response matrix mode is converted to Bray-Curtis distances automatically.",
-            "当前方法为 dbRDA。响应数据可使用普通响应矩阵、距离矩阵（方阵）或距离向量（condensed）；普通响应矩阵会自动转换为 Bray-Curtis 距离矩阵。",
+            "For the recommended input mode, upload the original species/community table directly. Do not calculate or enter a distance matrix in Excel. rdacca_hp calculates the selected distance inside the package.",
+            "推荐直接上传原始物种/群落数据表，无需在 Excel 中计算或填写距离矩阵；rdacca_hp 将在包内按所选方法自动计算距离。",
         )
     )
 else:
@@ -1010,9 +1175,6 @@ if dv_file is not None and iv_file is not None:
                 apply_hellinger=apply_hellinger,
             )
 
-            if method == "dbRDA" and dv_input_mode == "response_matrix":
-                dv = response_matrix_to_bray_distance(dv)
-
         with st.expander(tr("Preprocessed data preview", "预处理后的数据预览"), expanded=False):
             tab3, tab4 = st.tabs(
                 [
@@ -1025,8 +1187,46 @@ if dv_file is not None and iv_file is not None:
             with tab4:
                 st.dataframe(iv, use_container_width=True)
 
-        categorical_factors, ordered_factors, user_type_map = build_factor_settings(iv)
-        iv_for_analysis = filter_iv_by_user_types(iv, user_type_map)
+        (
+            categorical_factors,
+            ordered_factors,
+            user_type_map,
+            predictor_group_map,
+        ) = build_factor_settings(iv, enable_groups=use_predictor_groups)
+        iv_filtered = filter_iv_by_user_types(iv, user_type_map)
+        iv_for_analysis: Union[pd.DataFrame, Dict[str, pd.DataFrame]]
+        if use_predictor_groups:
+            iv_for_analysis = build_grouped_predictors(
+                iv_filtered,
+                predictor_group_map,
+            )
+            group_sizes: Dict[str, int] = {}
+            for col in iv_filtered.columns:
+                group_name = predictor_group_map.get(col, str(col)).strip()
+                group_sizes[group_name] = group_sizes.get(group_name, 0) + 1
+            if group_sizes and all(size == 1 for size in group_sizes.values()):
+                st.warning(
+                    tr(
+                        "Each predictor is currently assigned to its own group. "
+                        "This is still treated as grouped/list input and may give "
+                        "different permutation p-values from ungrouped data-frame input. "
+                        "To match permu.hp(dv, env), turn off grouped analysis.",
+                        "当前每个解释变量都被分配到单独的组。系统仍会按分组/list 输入处理，"
+                        "置换检验的 p 值可能不同于未分组的普通解释变量表输入。"
+                        "如果需要对应 permu.hp(dv, env)，请关闭“按解释变量组分析”。",
+                    )
+                )
+        else:
+            iv_for_analysis = iv_filtered
+
+        active_categorical_factors = [
+            name for name in categorical_factors if name in iv_filtered.columns
+        ]
+        active_ordered_factors = {
+            name: levels
+            for name, levels in ordered_factors.items()
+            if name in iv_filtered.columns
+        }
 
         random_state: Optional[int] = None
         if random_state_text.strip():
@@ -1049,8 +1249,14 @@ if dv_file is not None and iv_file is not None:
                     type=r2_type,
                     scale=scale,
                     var_part=var_part,
-                    categorical_factors=[x for x in categorical_factors if x in iv_for_analysis.columns],
-                    ordered_factors={k: v for k, v in ordered_factors.items() if k in iv_for_analysis.columns},
+                    n_perm=int(cca_n_perm),
+                    add=add,
+                    sqrt_dist=sqrt_dist,
+                    dbrdatype=dbrdatype,
+                    distance=distance_method,
+                    random_state=random_state,
+                    categorical_factors=active_categorical_factors,
+                    ordered_factors=active_ordered_factors,
                 )
 
             status_placeholder.empty()
@@ -1090,18 +1296,24 @@ if dv_file is not None and iv_file is not None:
             if run_permutation:
                 status_placeholder.info(tr("Running permutation test. Please wait.", "正在运行 permutation test，请稍候。"))
                 with st.spinner(tr("Running permutation test...", "正在运行 permutation test...")):
-                    perm_result = permu_hp(
+                    raw_perm_result = permu_hp(
                         dv=dv,
                         iv=iv_for_analysis,
                         method=method,
                         type=r2_type,
                         permutations=int(permutations),
                         scale=scale,
-                        categorical_factors=[x for x in categorical_factors if x in iv_for_analysis.columns],
-                        ordered_factors={k: v for k, v in ordered_factors.items() if k in iv_for_analysis.columns},
+                        n_perm=int(cca_n_perm),
+                        add=add,
+                        sqrt_dist=sqrt_dist,
+                        dbrdatype=dbrdatype,
+                        distance=distance_method,
+                        categorical_factors=active_categorical_factors,
+                        ordered_factors=active_ordered_factors,
                         verbose=False,
                         random_state=random_state,
                     )
+                    perm_result = format_permutation_result_for_web(raw_perm_result)
 
                 status_placeholder.empty()
 
@@ -1109,15 +1321,20 @@ if dv_file is not None and iv_file is not None:
                 st.dataframe(perm_result, use_container_width=True)
 
             params = {
+                "rdacca_hp_version": __version__,
                 "language": LANG,
                 "method": method,
                 "dv_input_mode": dv_input_mode,
                 "type": r2_type,
-                "dbRDA_response_matrix_distance": "braycurtis"
-                if method == "dbRDA" and dv_input_mode == "response_matrix"
-                else None,
+                "distance": distance_method,
+                "dbrdatype": dbrdatype if method == "dbRDA" else None,
+                "sqrt_dist": sqrt_dist if method == "dbRDA" else None,
+                "add": add if method == "dbRDA" else None,
                 "scale": scale,
                 "var_part": var_part,
+                "cca_n_perm": int(cca_n_perm)
+                if method == "CCA" and r2_type == "adjR2"
+                else None,
                 "run_permutation": run_permutation,
                 "permutations": int(permutations),
                 "random_state": random_state,
@@ -1127,9 +1344,11 @@ if dv_file is not None and iv_file is not None:
                 "dv_drop_rows_r_style": dv_drop_rows,
                 "iv_drop_rows_r_style": iv_drop_rows,
                 "iv_drop_cols": iv_drop_cols,
+                "use_predictor_groups": use_predictor_groups,
+                "predictor_group_map": predictor_group_map,
                 "user_type_map": user_type_map,
-                "categorical_factors": [x for x in categorical_factors if x in iv_for_analysis.columns],
-                "ordered_factors": {k: v for k, v in ordered_factors.items() if k in iv_for_analysis.columns},
+                "categorical_factors": active_categorical_factors,
+                "ordered_factors": active_ordered_factors,
             }
 
             with st.expander(tr("Current parameter record", "当前参数记录"), expanded=False):
