@@ -831,8 +831,8 @@ def friendly_error_message(e: Exception) -> str:
 st.title(tr("rdacca_hp Online Analysis System", "rdacca_hp 在线分析系统"))
 st.caption(
     tr(
-        f"rdacca_hp {__version__} · Hierarchical partitioning, variation partitioning, and permutation tests for RDA / CCA / dbRDA.",
-        f"rdacca_hp {__version__} · 用于 RDA / CCA / dbRDA 的层次分解、变异分解与置换检验",
+        f"rdacca_hp · Hierarchical partitioning, variation partitioning, and permutation tests for RDA / CCA / dbRDA.",
+        f"rdacca_hp · 用于 RDA / CCA / dbRDA 的层次分解、变异分解与置换检验",
     )
 )
 
@@ -1090,8 +1090,8 @@ with col1:
         dv_label = tr("Upload distance matrix (CSV / Excel)", "上传距离矩阵（CSV / Excel）")
     elif method == "dbRDA":
         dv_label = tr(
-            "Upload raw species/community matrix (CSV / Excel; not a distance matrix)",
-            "上传原始物种/群落矩阵（CSV / Excel；不是距离矩阵）",
+            "Upload raw species/community matrix (CSV / Excel)",
+            "上传原始物种/群落矩阵（CSV / Excel）",
         )
     else:
         dv_label = tr("Upload response table (CSV / Excel)", "上传响应变量表（CSV / Excel）")
