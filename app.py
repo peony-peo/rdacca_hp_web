@@ -11,7 +11,7 @@ from rdacca_hp import __version__, permu_hp, rdacca_hp
 from rdacca_hp.utils import VEGAN_DISTANCE_METHODS, coerce_distance_input
 
 
-st.set_page_config(page_title="rdacca_hp Online Analysis System", layout="wide")
+st.set_page_config(page_title="rdacca.hp Online Analysis System", layout="wide")
 
 
 # =========================
@@ -709,7 +709,7 @@ def make_bar_chart(df: pd.DataFrame, value_col: str, title: str, file_prefix: st
     ax.bar(plot_df.index.astype(str), plot_df[value_col].values)
 
     ax.set_title(title, fontsize=12)
-    ax.set_xlabel(tr("Variables", "变量"), fontsize=10)
+    ax.set_xlabel("Variables", fontsize=10)
     ax.set_ylabel(value_col, fontsize=10)
 
     ax.tick_params(axis="x", labelsize=9)
@@ -828,11 +828,11 @@ def friendly_error_message(e: Exception) -> str:
 # =========================
 # Page
 # =========================
-st.title(tr("rdacca_hp Online Analysis System", "rdacca_hp 在线分析系统"))
+st.title(tr("rdacca.hp Online Analysis System", "rdacca.hp 在线分析系统"))
 st.caption(
     tr(
-        f"rdacca_hp · Hierarchical partitioning, variation partitioning, and permutation tests for RDA / CCA / dbRDA.",
-        f"rdacca_hp · 用于 RDA / CCA / dbRDA 的层次分解、变异分解与置换检验",
+        f"rdacca.hp · Hierarchical partitioning, variation partitioning, and permutation tests for RDA / CCA / dbRDA.",
+        f"rdacca.hp · 用于 RDA / CCA / dbRDA 的层次分解、变异分解与置换检验",
     )
 )
 
@@ -864,7 +864,7 @@ with st.sidebar:
         value=False,
         help=tr(
             "Pass the scale parameter to rdacca_hp. Usually keep the default unless you need to match a specific workflow.",
-            "传递给 rdacca_hp 的 scale 参数。通常保持默认即可；如需与特定分析流程保持一致时再启用。",
+            "传递给 rdacca.hp 的 scale 参数。通常保持默认即可；如需与特定分析流程保持一致时再启用。",
         ),
     )
 
@@ -929,8 +929,8 @@ with st.sidebar:
             value=1000,
             step=1,
             help=tr(
-                "This is n_perm for RsquareAdj.cca and is separate from the outer permu_hp test.",
-                "这是计算 CCA 调整 R2 的 n_perm，与外层 permu_hp 显著性置换次数不同。",
+                "This is n_perm for RsquareAdj.cca and is separate from the outer permu.hp test.",
+                "这是计算 CCA 调整 R2 的 n_perm，与外层 permu.hp 显著性置换次数不同。",
             ),
         )
 
@@ -949,8 +949,8 @@ with st.sidebar:
             format_func=dv_mode_label,
             index=0,
             help=tr(
-                "dbRDA can use precomputed distances or a raw response matrix whose distances are calculated by rdacca_hp.",
-                "dbRDA 可使用预先计算的距离，也可上传原始响应矩阵并由 rdacca_hp 计算距离。",
+                "dbRDA can use precomputed distances or a raw response matrix whose distances are calculated by rdacca.hp.",
+                "dbRDA 可使用预先计算的距离，也可上传原始响应矩阵并由 rdacca.hp 计算距离。",
             ),
         )
 
@@ -960,8 +960,8 @@ with st.sidebar:
                 list(VEGAN_DISTANCE_METHODS),
                 index=list(VEGAN_DISTANCE_METHODS).index("bray"),
                 help=tr(
-                    "Distance is calculated inside rdacca_hp using vegan-compatible definitions.",
-                    "距离由 rdacca_hp 在包内按 vegan 兼容定义计算。",
+                    "Distance is calculated inside rdacca.hp using vegan-compatible definitions.",
+                    "距离由 rdacca.hp 在包内按 vegan 兼容定义计算。",
                 ),
             )
 
@@ -1037,8 +1037,8 @@ with st.sidebar:
         apply_hellinger = False
         st.caption(
             tr(
-                "Current mode uses a raw response matrix; rdacca_hp will calculate the selected distance. Hellinger preprocessing is not applied here.",
-                "当前为 dbRDA 原始响应矩阵模式；rdacca_hp 将计算所选距离，网页不额外进行 Hellinger 转换。",
+                "Current mode uses a raw response matrix; rdacca.hp will calculate the selected distance. Hellinger preprocessing is not applied here.",
+                "当前为 dbRDA 原始响应矩阵模式；rdacca.hp 将计算所选距离，网页不额外进行 Hellinger 转换。",
             )
         )
     else:
@@ -1112,8 +1112,8 @@ with col2:
 if method == "dbRDA":
     st.info(
         tr(
-            "For the recommended input mode, upload the original species/community table directly. Do not calculate or enter a distance matrix in Excel. rdacca_hp calculates the selected distance inside the package.",
-            "推荐直接上传原始物种/群落数据表，无需在 Excel 中计算或填写距离矩阵；rdacca_hp 将在包内按所选方法自动计算距离。",
+            "For the recommended input mode, upload the original species/community table directly. Do not calculate or enter a distance matrix in Excel. rdacca.hp calculates the selected distance inside the package.",
+            "推荐直接上传原始物种/群落数据表，无需在 Excel 中计算或填写距离矩阵；rdacca.hp 将在包内按所选方法自动计算距离。",
         )
     )
 else:
@@ -1241,7 +1241,7 @@ if dv_file is not None and iv_file is not None:
                 )
             )
 
-            with st.spinner(tr("Running rdacca_hp analysis...", "正在运行 rdacca_hp 分析...")):
+            with st.spinner(tr("Running rdacca.hp analysis...", "正在运行 rdacca.hp 分析...")):
                 result = rdacca_hp(
                     dv=dv,
                     iv=iv_for_analysis,
@@ -1260,7 +1260,7 @@ if dv_file is not None and iv_file is not None:
                 )
 
             status_placeholder.empty()
-            st.success(tr("rdacca_hp analysis completed.", "rdacca_hp 分析完成。"))
+            st.success(tr("rdacca.hp analysis completed.", "rdacca.hp 分析完成。"))
 
             st.subheader(tr("Total explained variation", "总解释率"))
             total_value = float(result.total_explained_variation)
@@ -1321,7 +1321,7 @@ if dv_file is not None and iv_file is not None:
                 st.dataframe(perm_result, use_container_width=True)
 
             params = {
-                "rdacca_hp_version": __version__,
+                "rdacca.hp_version": __version__,
                 "language": LANG,
                 "method": method,
                 "dv_input_mode": dv_input_mode,
